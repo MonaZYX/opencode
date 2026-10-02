@@ -1381,6 +1381,10 @@ export type GlobalEvent = {
           sessionID: string
           permission: string
           patterns: Array<string>
+          commands?: Array<{
+            raw: string
+            canonical: string
+          }>
           metadata: {
             [key: string]: unknown
           }
@@ -2473,6 +2477,10 @@ export type PermissionRequest = {
   sessionID: string
   permission: string
   patterns: Array<string>
+  commands?: Array<{
+    raw: string
+    canonical: string
+  }>
   metadata: {
     [key: string]: unknown
   }
@@ -5713,6 +5721,10 @@ export type PermissionAsked = {
     sessionID: string
     permission: string
     patterns: Array<string>
+    commands?: Array<{
+      raw: string
+      canonical: string
+    }>
     metadata: {
       [key: string]: unknown
     }
@@ -6867,6 +6879,10 @@ export type EventPermissionAsked = {
     sessionID: string
     permission: string
     patterns: Array<string>
+    commands?: Array<{
+      raw: string
+      canonical: string
+    }>
     metadata: {
       [key: string]: unknown
     }

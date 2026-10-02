@@ -16,6 +16,7 @@ export interface Interface {
 }
 
 interface PendingEntry {
+  ruleset: PermissionV1.Ruleset
   info: PermissionV1.Request
   deferred: Deferred.Deferred<void, PermissionV1.RejectedError | PermissionV1.CorrectedError>
 }
@@ -35,6 +36,26 @@ export function evaluate(permission: string, pattern: string, ...rulesets: Permi
       pattern: "*",
     }
   )
+}
+
+// Only remembered Always approvals can supply the additional canonical match.
+// A raw match, including an explicit ask, always uses existing precedence.
+export function evaluateCommand(
+  request: Pick<PermissionV1.Request, "permission" | "commands">,
+  raw: string,
+  ruleset: PermissionV1.Ruleset,
+  approved: PermissionV1.Ruleset,
+): PermissionV1.Rule {
+  const matched = [...ruleset, ...approved].findLast(
+    (rule) => Wildcard.match(request.permission, rule.permission) && Wildcard.match(raw, rule.pattern),
+  )
+  if (matched) return matched
+  const canonical = request.commands?.find((command) => command.raw === raw)?.canonical
+  if (canonical) {
+    const remembered = evaluate(request.permission, canonical, approved)
+    if (remembered.action === "allow") return remembered
+  }
+  return evaluate(request.permission, raw)
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
@@ -70,7 +91,7 @@ const layer = Layer.effect(
       let needsAsk = false
 
       for (const pattern of request.patterns) {
-        const rule = evaluate(request.permission, pattern, ruleset, approved)
+        const rule = evaluateCommand(request, pattern, ruleset, approved)
         yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
           return yield* new PermissionV1.DeniedError({
@@ -89,6 +110,7 @@ const layer = Layer.effect(
         sessionID: request.sessionID,
         permission: request.permission,
         patterns: request.patterns,
+        commands: request.commands,
         metadata: request.metadata,
         always: request.always,
         tool: request.tool,
@@ -96,7 +118,7 @@ const layer = Layer.effect(
       yield* Effect.logInfo("asking", { id, permission: info.permission, patterns: info.patterns })
 
       const deferred = yield* Deferred.make<void, PermissionV1.RejectedError | PermissionV1.CorrectedError>()
-      pending.set(id, { info, deferred })
+      pending.set(id, { info, deferred, ruleset })
       yield* events.publish(Event.Asked, info)
       return yield* Effect.ensuring(
         Deferred.await(deferred),
@@ -153,7 +175,7 @@ const layer = Layer.effect(
       for (const [id, item] of pending.entries()) {
         if (item.info.sessionID !== existing.info.sessionID) continue
         const ok = item.info.patterns.every(
-          (pattern) => evaluate(item.info.permission, pattern, approved).action === "allow",
+          (pattern) => evaluateCommand(item.info, pattern, item.ruleset, approved).action === "allow",
         )
         if (!ok) continue
         pending.delete(id)

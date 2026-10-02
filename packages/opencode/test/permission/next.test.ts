@@ -1172,3 +1172,87 @@ it.instance(
     }),
   { git: true },
 )
+
+test("Request 5 raw Always reuse baseline is 1/3", () => {
+  const commands = ["npm --silent run test", "npm run --silent test", "npm run test --silent"]
+  const approved: PermissionV1.Ruleset = [{ permission: "bash", pattern: "npm run test *", action: "allow" }]
+  expect(commands.filter((raw) => Permission.evaluate("bash", raw, approved).action === "allow")).toHaveLength(1)
+  for (const action of ["allow", "deny", "ask"] as const) {
+    expect(
+      Permission.evaluate("bash", commands[0], [{ permission: "bash", pattern: commands[0], action }], approved).action,
+    ).toBe(action)
+  }
+})
+
+test("Request 5 canonical reuse is 3/3 and preserves every raw decision", () => {
+  const approved: PermissionV1.Ruleset = [{ permission: "bash", pattern: "npm run test *", action: "allow" }]
+  const variants = ["npm --silent run test", "npm run --silent test", "npm run test --silent"]
+  const request = { permission: "bash", commands: variants.map((raw) => ({ raw, canonical: "npm run test" })) }
+  expect(
+    variants.filter((raw) => Permission.evaluateCommand(request, raw, [], approved).action === "allow"),
+  ).toHaveLength(3)
+  for (const raw of variants) {
+    for (const action of ["allow", "deny", "ask"] as const) {
+      const rules: PermissionV1.Ruleset = [{ permission: "bash", pattern: raw, action }]
+      expect(Permission.evaluateCommand(request, raw, rules, approved)).toEqual(
+        Permission.evaluate("bash", raw, rules, approved),
+      )
+    }
+  }
+  for (const action of ["allow", "deny", "ask"] as const) {
+    const rules: PermissionV1.Ruleset = [{ permission: "*", pattern: "*", action }]
+    expect(Permission.evaluateCommand(request, variants[0], rules, approved).action).toBe(action)
+  }
+  expect(Permission.evaluateCommand(request, "npm run dev", [], approved).action).toBe("ask")
+  expect(Permission.evaluateCommand(request, "unknown --silent", [], approved).action).toBe("ask")
+  expect(Permission.evaluateCommand(request, variants[0], approved, []).action).toBe("ask")
+})
+
+it.instance(
+  "Request 5 Always rechecks associations and protects pending raw ask",
+  () =>
+    Effect.gen(function* () {
+      const sessionID = SessionID.make("session_request5")
+      const base = { sessionID, permission: "bash", metadata: {}, ruleset: [], always: ["npm run test *"] }
+      const first = yield* ask({ ...base, id: PermissionV1.ID.make("per_r5first"), patterns: ["npm run test"] }).pipe(
+        Effect.forkScoped,
+      )
+      const raw = "npm --silent run test"
+      const commands = [{ raw, canonical: "npm run test" }]
+      const second = yield* ask({ ...base, patterns: [raw], commands }).pipe(Effect.forkScoped)
+      const protectedRequest = yield* ask({
+        ...base,
+        patterns: [raw],
+        commands,
+        ruleset: [{ permission: "bash", pattern: raw, action: "ask" }],
+      }).pipe(Effect.forkScoped)
+      const compound = yield* ask({ ...base, patterns: [raw, "npm run dev"], commands }).pipe(Effect.forkScoped)
+      yield* waitForPending(4)
+      yield* reply({ requestID: PermissionV1.ID.make("per_r5first"), reply: "always" })
+      yield* Fiber.join(first)
+      yield* Fiber.join(second)
+      const remaining = yield* waitForPending(2)
+      expect(remaining.map((item) => item.patterns)).toContainEqual([raw])
+      expect(remaining.map((item) => item.patterns)).toContainEqual([raw, "npm run dev"])
+      // The initial ask path must reuse the same remembered canonical approval.
+      for (const variant of [raw, "npm run --silent test", "npm run test --silent"]) {
+        yield* ask({ ...base, patterns: [variant], commands: [{ raw: variant, canonical: "npm run test" }] })
+      }
+      expect(
+        yield* fail(
+          ask({ ...base, patterns: [raw], commands, ruleset: [{ permission: "bash", pattern: raw, action: "deny" }] }),
+        ),
+      ).toBeInstanceOf(PermissionV1.DeniedError)
+      yield* ask({
+        ...base,
+        patterns: [raw],
+        commands,
+        ruleset: [{ permission: "bash", pattern: raw, action: "allow" }],
+      })
+      expect((yield* list()).map((item) => item.commands)).toEqual([commands, commands])
+      for (const item of remaining) yield* reply({ requestID: item.id, reply: "once" })
+      yield* Fiber.join(protectedRequest)
+      yield* Fiber.join(compound)
+    }),
+  { git: true },
+)

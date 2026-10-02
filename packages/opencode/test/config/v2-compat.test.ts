@@ -60,6 +60,11 @@ describe("V2 compatibility read fixtures", () => {
 })
 
 describe("ConfigV2Compat.lower", () => {
+  test("preserves LSP extension preferences", () => {
+    const config = lower({ lsp: true, lspPreference: { ".ts": "typescript" } })
+    expect(config.lspPreference).toEqual({ ".ts": "typescript" })
+  })
+
   test("returns structured invalid diagnostics while retaining supported siblings", () => {
     const result = ConfigV2Compat.lower({
       mcp: {

@@ -42,43 +42,43 @@ describe("LSP service lifecycle", () => {
     ),
   )
 
-  it.instance("hasClients() returns false for .ts files in instance when LSP is unset", () =>
+  it.instance("ensureClients() returns false for .ts files in instance when LSP is unset", () =>
     LSP.Service.use((lsp) =>
       Effect.gen(function* () {
-        const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
+        const result = yield* lsp.ensureClients(path.join((yield* TestInstance).directory, "test.ts"))
         expect(result).toBe(false)
       }),
     ),
   )
 
   it.instance(
-    "hasClients() returns true for .ts files in instance when lsp is true",
+    "ensureClients() returns false when matching servers cannot start",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
-          const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
-          expect(result).toBe(true)
+          const result = yield* lsp.ensureClients(path.join((yield* TestInstance).directory, "test.ts"))
+          expect(result).toBe(false)
         }),
       ),
     { config: { lsp: true } },
   )
 
   it.instance(
-    "hasClients() keeps built-in LSPs when config object is provided",
+    "ensureClients() requires a live client with a config object",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
-          const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
-          expect(result).toBe(true)
+          const result = yield* lsp.ensureClients(path.join((yield* TestInstance).directory, "test.ts"))
+          expect(result).toBe(false)
         }),
       ),
     { config: { lsp: { eslint: { disabled: true } } } },
   )
 
-  it.instance("hasClients() returns false for files outside instance", () =>
+  it.instance("ensureClients() returns false for files outside instance", () =>
     LSP.Service.use((lsp) =>
       Effect.gen(function* () {
-        const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "..", "outside.ts"))
+        const result = yield* lsp.ensureClients(path.join((yield* TestInstance).directory, "..", "outside.ts"))
         expect(typeof result).toBe("boolean")
       }),
     ),

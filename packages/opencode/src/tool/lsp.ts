@@ -74,7 +74,7 @@ export const LspTool = Tool.define(
           const exists = yield* fs.existsSafe(file)
           if (!exists) throw new Error(`File not found: ${file}`)
 
-          const available = yield* lsp.hasClients(file)
+          const available = yield* lsp.ensureClients(file)
           if (!available) throw new Error("No LSP server available for this file type.")
 
           yield* lsp.touchFile(file, "document")

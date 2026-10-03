@@ -75,9 +75,6 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   lsp: ConfigLSP.Info.pipe(Schema.optional).annotate({
     description: "Enable built-in language servers or configure server overrides",
   }),
-  lspPreference: ConfigLSP.Preference.pipe(Schema.optional).annotate({
-    description: "Preferred LSP server ID for each file extension",
-  }),
   attachments: ConfigAttachments.Info.pipe(Schema.optional).annotate({
     description: "Attachment processing configuration",
   }),

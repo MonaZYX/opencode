@@ -16,7 +16,3 @@ export class Server extends Schema.Class<Server>("ConfigV2.LSP.Server")({
 
 export const Entry = Schema.Union([Disabled, Server])
 export const Info = Schema.Union([Schema.Boolean, Schema.Record(Schema.String, Entry)])
-export const Preference = Schema.Record(
-  Schema.String.check(Schema.isPattern(/^\.[^./\\]+$/)),
-  Schema.String.check(Schema.isPattern(/^.+$/)),
-)

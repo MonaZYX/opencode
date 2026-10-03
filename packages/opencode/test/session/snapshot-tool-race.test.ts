@@ -62,8 +62,7 @@ const lsp = Layer.succeed(
   LSP.Service.of({
     init: () => Effect.void,
     status: () => Effect.succeed([]),
-    ensureClients: () => Effect.succeed(false),
-    explain: (file) => Effect.succeed({ file, extension: "", decisions: [] }),
+    hasClients: () => Effect.succeed(false),
     touchFile: () => Effect.void,
     diagnostics: () => Effect.succeed({}),
     hover: () => Effect.succeed(undefined),

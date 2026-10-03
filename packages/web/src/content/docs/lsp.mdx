@@ -184,26 +184,6 @@ To disable a **specific** LSP server, set `disabled` to `true`:
 
 ---
 
-### Prefer a server for a file extension
-
-Use `lspPreference` to select one server for an extension while leaving other servers available for their other extensions:
-
-```json title="opencode.json"
-{
-  "$schema": "https://opencode.ai/config.json",
-  "lsp": true,
-  "lspPreference": {
-    ".ts": "typescript"
-  }
-}
-```
-
-Without a preference, all matching enabled servers retain their usual behavior. If the preferred server is disabled, does not apply to the project, or cannot start, OpenCode tries the other matching servers in registry order and stops after the first one starts. OpenCode logs a warning naming the fallback. The fallback may offer fewer features: if `typescript` fails, a checker such as Biome may start but may not provide type-aware navigation. If `lsp` is `false`, preferences are ignored. An unknown server ID produces a warning and uses the same fallback. Selecting only `typescript` for `.ts` also means LSP diagnostics from ESLint, Oxlint, and Biome are not used for those files.
-
-Run `opencode debug lsp explain <file>` to see which servers matched, which started, and why. This command starts selected servers if they are not already running.
-
----
-
 ### Custom LSP servers
 
 You can add custom LSP servers by specifying the command and file extensions:

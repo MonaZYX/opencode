@@ -112,45 +112,14 @@ type LocInput = { file: string; line: number; character: number }
 interface State {
   clients: LSPClient.Info[]
   servers: Record<string, LSPServer.Info>
-  inactive: Record<string, { extensions: string[]; reason: "disabled" | "python-flag" }>
-  preference: Record<string, string>
   broken: Set<string>
   spawning: Map<string, Promise<LSPClient.Info | undefined>>
-  warnedFallback: Set<string>
-}
-
-export interface Decision {
-  id: string
-  selected: boolean
-  started: boolean
-  reason:
-    | "default"
-    | "preferred"
-    | "fallback"
-    | "not-preferred"
-    | "disabled"
-    | "python-flag"
-    | "no-root"
-    | "broken"
-    | "spawn-failed"
-    | "extension-mismatch"
-    | "unknown-preference"
-  root?: string
-}
-
-export interface Explanation {
-  file: string
-  extension: string
-  preferred?: string
-  decisions: Decision[]
 }
 
 export interface Interface {
   readonly init: () => Effect.Effect<void>
   readonly status: () => Effect.Effect<Status[]>
-  /** Starts matching language-server processes if needed, then checks for a running client. */
-  readonly ensureClients: (file: string) => Effect.Effect<boolean>
-  readonly explain: (file: string) => Effect.Effect<Explanation>
+  readonly hasClients: (file: string) => Effect.Effect<boolean>
   readonly touchFile: (input: string, diagnostics?: "document" | "full") => Effect.Effect<void>
   readonly diagnostics: () => Effect.Effect<Record<string, LSPClient.Diagnostic[]>>
   readonly hover: (input: LocInput) => Effect.Effect<any>
@@ -178,35 +147,24 @@ const layer = Layer.effect(
         const cfg = yield* config.get()
 
         const servers: Record<string, LSPServer.Info> = {}
-        const inactive: State["inactive"] = {}
 
         if (!cfg.lsp) {
           yield* Effect.logInfo("all LSPs are disabled")
-          if (Object.keys(cfg.lspPreference ?? {}).length) {
-            yield* Effect.logWarning("LSP preferences are ignored because LSP is disabled")
-          }
         } else {
           for (const server of Object.values(LSPServer)) {
             servers[server.id] = server
           }
 
           filterExperimentalServers(servers, flags)
-          const excluded = flags.experimentalLspTy ? LSPServer.Pyright : LSPServer.Ty
-          inactive[excluded.id] = { extensions: excluded.extensions, reason: "python-flag" }
 
           if (cfg.lsp !== true) {
             for (const [name, item] of Object.entries(cfg.lsp)) {
               const existing = servers[name]
               if (item.disabled) {
                 yield* Effect.logInfo(`LSP server ${name} is disabled`)
-                inactive[name] = {
-                  extensions: existing?.extensions ?? inactive[name]?.extensions ?? [],
-                  reason: "disabled",
-                }
                 delete servers[name]
                 continue
               }
-              delete inactive[name]
               servers[name] = {
                 ...existing,
                 id: name,
@@ -223,11 +181,6 @@ const layer = Layer.effect(
             }
           }
 
-          for (const [extension, id] of Object.entries(cfg.lspPreference ?? {})) {
-            if (servers[id] || inactive[id]) continue
-            yield* Effect.logWarning("unknown preferred LSP server", { extension, serverID: id })
-          }
-
           yield* Effect.logInfo("enabled LSP servers", {
             serverIds: Object.values(servers)
               .map((server) => server.id)
@@ -238,11 +191,8 @@ const layer = Layer.effect(
         const s: State = {
           clients: [],
           servers,
-          inactive,
-          preference: cfg.lsp ? (cfg.lspPreference ?? {}) : {},
           broken: new Set(),
           spawning: new Map(),
-          warnedFallback: new Set(),
         }
 
         yield* Effect.addFinalizer(() =>
@@ -255,21 +205,13 @@ const layer = Layer.effect(
       }),
     )
 
-    const resolve = Effect.fnUntraced(function* (file: string) {
+    const getClients = Effect.fnUntraced(function* (file: string) {
       const ctx = yield* InstanceState.context
-      const extension = path.parse(file).ext || file
-      if (!containsPath(file, ctx)) {
-        return {
-          clients: [] as LSPClient.Info[],
-          explanation: { file, extension, decisions: [] } as Explanation,
-        }
-      }
+      if (!containsPath(file, ctx)) return [] as LSPClient.Info[]
       const s = yield* InstanceState.get(state)
-      const resolved = yield* Effect.promise(async () => {
-        const clients: LSPClient.Info[] = []
-        const decisions: Decision[] = []
-        const candidates: { server: LSPServer.Info; root: string; decision: Decision }[] = []
-        const preferred = s.preference[extension]
+      const clients = yield* Effect.promise(async () => {
+        const extension = path.parse(file).ext || file
+        const result: LSPClient.Info[] = []
         let updated = 0
 
         async function schedule(server: LSPServer.Info, root: string, key: string) {
@@ -284,10 +226,7 @@ const layer = Layer.effect(
               return undefined
             })
 
-          if (!handle?.process.pid) {
-            s.broken.add(key)
-            return undefined
-          }
+          if (!handle) return undefined
           const client = await LSPClient.create({
             serverID: server.id,
             server: handle,
@@ -314,49 +253,23 @@ const layer = Layer.effect(
 
         for (const server of Object.values(s.servers)) {
           if (server.extensions.length && !server.extensions.includes(extension)) continue
+
           const root = await server.root(file, ctx)
-          if (!root) {
-            decisions.push({ id: server.id, selected: false, started: false, reason: "no-root" })
-            continue
-          }
-          if (s.broken.has(root + server.id)) {
-            decisions.push({ id: server.id, selected: false, started: false, reason: "broken", root })
-            continue
-          }
-          const decision: Decision = { id: server.id, selected: false, started: false, reason: "not-preferred", root }
-          decisions.push(decision)
-          candidates.push({ server, root, decision })
-        }
+          if (!root) continue
+          if (s.broken.has(root + server.id)) continue
 
-        for (const [id, item] of Object.entries(s.inactive)) {
-          if (!item.extensions.includes(extension) && id !== preferred) continue
-          decisions.push({ id, selected: false, started: false, reason: item.reason })
-        }
-        if (preferred && !decisions.some((decision) => decision.id === preferred)) {
-          decisions.push({
-            id: preferred,
-            selected: false,
-            started: false,
-            reason: s.servers[preferred] ? "extension-mismatch" : "unknown-preference",
-          })
-        }
-
-        async function start(candidate: (typeof candidates)[number]) {
-          const { server, root, decision } = candidate
           const match = s.clients.find((x) => x.root === root && x.serverID === server.id)
           if (match) {
-            clients.push(match)
-            decision.started = true
-            return
+            result.push(match)
+            continue
           }
 
           const inflight = s.spawning.get(root + server.id)
           if (inflight) {
             const client = await inflight
-            if (client) clients.push(client)
-            decision.started = Boolean(client)
-            if (!client) decision.reason = "spawn-failed"
-            return
+            if (!client) continue
+            result.push(client)
+            continue
           }
 
           const task = schedule(server, root, root + server.id)
@@ -369,55 +282,18 @@ const layer = Layer.effect(
           })
 
           const client = await task
-          if (!client) {
-            decision.reason = "spawn-failed"
-            return
-          }
-          clients.push(client)
-          decision.started = true
+          if (!client) continue
+
+          result.push(client)
           updated++
         }
 
-        if (!preferred) {
-          for (const candidate of candidates) {
-            candidate.decision.selected = true
-            candidate.decision.reason = "default"
-            await start(candidate)
-          }
-        } else {
-          const choice = candidates.find((candidate) => candidate.server.id === preferred)
-          for (const candidate of choice ? [choice, ...candidates.filter((item) => item !== choice)] : candidates) {
-            candidate.decision.selected = true
-            candidate.decision.reason = candidate === choice ? "preferred" : "fallback"
-            await start(candidate)
-            if (candidate.decision.started) break
-          }
-        }
-
-        return { clients, explanation: { file, extension, preferred, decisions }, updated }
+        return { result, updated }
       })
-      const fallback = resolved.explanation.decisions.find(
-        (decision) => decision.reason === "fallback" && decision.started,
-      )
-      if (fallback && resolved.explanation.preferred) {
-        const warning = `${extension}:${resolved.explanation.preferred}:${fallback.id}`
-        if (!s.warnedFallback.has(warning)) {
-          s.warnedFallback.add(warning)
-          yield* Effect.logWarning("preferred LSP unavailable; fallback server may offer different features", {
-            extension,
-            preferred: resolved.explanation.preferred,
-            fallback: fallback.id,
-          })
-        }
-      }
-      yield* Effect.forEach(Array.from({ length: resolved.updated }), () => events.publish(Event.Updated, {}), {
+      yield* Effect.forEach(Array.from({ length: clients.updated }), () => events.publish(Event.Updated, {}), {
         discard: true,
       })
-      return resolved
-    })
-
-    const getClients = Effect.fnUntraced(function* (file: string) {
-      return (yield* resolve(file)).clients
+      return clients.result
     })
 
     const run = Effect.fnUntraced(function* <T>(file: string, fn: (client: LSPClient.Info) => Promise<T>) {
@@ -449,20 +325,25 @@ const layer = Layer.effect(
       return result
     })
 
-    const ensureClients = Effect.fn("LSP.ensureClients")(function* (file: string) {
-      // The LSP tool calls touchFile immediately after this check, so clients started here are reused there.
-      return (yield* resolve(file)).clients.length > 0
-    })
-
-    const explain = Effect.fn("LSP.explain")(function* (file: string) {
-      return (yield* resolve(file)).explanation
+    const hasClients = Effect.fn("LSP.hasClients")(function* (file: string) {
+      const ctx = yield* InstanceState.context
+      const s = yield* InstanceState.get(state)
+      return yield* Effect.promise(async () => {
+        const extension = path.parse(file).ext || file
+        for (const server of Object.values(s.servers)) {
+          if (server.extensions.length && !server.extensions.includes(extension)) continue
+          const root = await server.root(file, ctx)
+          if (!root) continue
+          if (s.broken.has(root + server.id)) continue
+          return true
+        }
+        return false
+      })
     })
 
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
       yield* Effect.logInfo("touching file", { file: input })
-      const resolved = yield* resolve(input)
-      yield* Effect.logInfo("LSP selection", resolved.explanation)
-      const clients = resolved.clients
+      const clients = yield* getClients(input)
       yield* Effect.promise(() =>
         Promise.all(
           clients.map(async (client) => {
@@ -599,8 +480,7 @@ const layer = Layer.effect(
     return Service.of({
       init,
       status,
-      ensureClients,
-      explain,
+      hasClients,
       touchFile,
       diagnostics,
       hover,

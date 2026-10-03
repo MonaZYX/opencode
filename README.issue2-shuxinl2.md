@@ -56,7 +56,28 @@ Verify in the independent copy on Windows with Bun 1.3.14:
 | Package type checking | Passed; exit code 0 |
 
 Evidence:
-<img src="1.png" width="400">
+The following checks ran from `formatting-issue-copy/packages/opencode` on Windows with Bun 1.3.14.
+
+**New formatter failure and tool integration tests**
+```text
+10 pass
+0 fail
+49 expect() calls
+Ran 10 tests across 2 files. [76.76s]
+```
+
+**Selected regression suite**
+```text
+111 pass
+0 fail
+248 expect() calls
+Ran 111 tests across 7 files. [176.43s]
+```
+
+**Package type checking**
+
+`bun typecheck` ran `tsgo --noEmit` without reported errors. PowerShell `$LASTEXITCODE` returned `0`.
+
 
 The 10 new tests are included in the 111-test regression suite. The results do not establish that the entire repository’s test suite passes.
 

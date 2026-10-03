@@ -5,7 +5,6 @@ import { cmd } from "../cmd"
 import { EOL } from "os"
 import path from "path"
 import { InstanceState } from "@/effect/instance-state"
-import { FSUtil } from "@opencode-ai/core/fs-util"
 
 export const LSPCommand = cmd({
   command: "lsp",
@@ -41,8 +40,7 @@ const ExplainCommand = effectCmd({
   builder: (yargs) => yargs.positional("file", { type: "string", demandOption: true }),
   handler: Effect.fn("Cli.debug.lsp.explain")(function* (args) {
     const ctx = yield* InstanceState.context
-    const fs = yield* FSUtil.Service
-    const file = yield* fs.resolve(path.resolve(ctx.directory, args.file))
+    const file = path.isAbsolute(args.file) ? args.file : path.join(ctx.directory, args.file)
     const result = yield* LSP.Service.use((lsp) => lsp.explain(file))
     process.stdout.write(JSON.stringify(result, null, 2) + EOL)
   }),

@@ -1197,3 +1197,55 @@ describe("tool.shell truncation", () => {
     ),
   )
 })
+
+it.live("Request 5 shell requests preserve raw commands and associate canonical identities", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    yield* runIn(
+      tmp,
+      Effect.gen(function* () {
+        const variants = ["npm --silent run test", "npm run --silent test", "npm run test --silent"]
+        for (const command of [
+          ...variants,
+          "npm --silent run test && npm run dev",
+          "git -C /tmp status",
+          "docker compose -f x.yml up",
+          "rm -rf foo",
+          "unknown --silent run test",
+          "npm $SUBCOMMAND run test",
+          "npm run test > output.txt",
+          "MODE=test npm run test",
+        ]) {
+          const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+          yield* fail({ command }, capture(requests, new Error("stop before execution")))
+          const request = requests.find((item) => item.permission === "bash")!
+          expect(request).toBeDefined()
+          if (variants.includes(command)) {
+            expect(request.patterns).toEqual([command])
+            expect(request.commands).toEqual([{ raw: command, canonical: "npm run test" }])
+            expect(request.always).toEqual(["npm run test *"])
+          }
+          if (command.includes("&&")) {
+            expect(request.patterns).toEqual(["npm --silent run test", "npm run dev"])
+            expect(request.commands).toEqual([
+              { raw: "npm --silent run test", canonical: "npm run test" },
+              { raw: "npm run dev", canonical: "npm run dev" },
+            ])
+            expect(request.always).toEqual(["npm run test *", "npm run dev *"])
+          }
+          if (command === "git -C /tmp status") expect(request.always).toEqual(["git status *"])
+          if (command === "docker compose -f x.yml up") expect(request.always).toEqual(["docker compose up *"])
+          if (command === "rm -rf foo") expect(request.always).toEqual(["rm *"])
+          if (command.includes("$SUBCOMMAND") || command.includes(">") || command.startsWith("MODE=")) {
+            expect(request.commands).toEqual([])
+            expect(request.patterns).toEqual([command])
+          }
+          if (command.startsWith("unknown")) {
+            expect(request.always).toEqual(["unknown *"])
+            expect(request.commands).toEqual([])
+          }
+        }
+      }),
+    )
+  }),
+)

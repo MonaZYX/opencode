@@ -42,8 +42,9 @@ describe("command merge", () => {
     expect(result.commands.review?.template).toBe("config")
     expect(result.collisions).toHaveLength(1)
     expect(result.collisions[0]?.hidden.map((item) => item.source)).toEqual(["skill", "mcp", "built-in"])
-    expect(collisionMessage(result.collisions[0]!)).toContain("Using config review (config)")
-    expect(collisionMessage(result.collisions[0]!)).toContain("skill review (/skills/review/SKILL.md)")
+    expect(collisionMessage(result.collisions[0]!)).toBe(
+      "/review is defined more than once. Using config /review. Hidden: skill /review (/skills/review/SKILL.md), mcp /review, built-in /review.",
+    )
   })
 
   test("every source pair has the same winner in either discovery order", () => {

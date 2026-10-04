@@ -46,7 +46,8 @@ export function merge(groups: readonly (readonly Candidate[])[]) {
 }
 
 export function collisionMessage(collision: Collision) {
-  const label = (candidate: Candidate) => `${candidate.source} ${candidate.command.name} (${candidate.origin})`
+  const label = (candidate: Candidate) =>
+    `${candidate.source} /${candidate.command.name}${candidate.origin === candidate.source ? "" : ` (${candidate.origin})`}`
   return `/${collision.name} is defined more than once. Using ${label(collision.winner)}. Hidden: ${collision.hidden.map(label).join(", ")}.`
 }
 

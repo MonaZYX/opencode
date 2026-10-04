@@ -215,6 +215,7 @@ export const ApplyPatchTool = Tool.define(
       })
 
       // Apply the changes
+      const formatReports: string[] = []
       const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
 
       for (const change of fileChanges) {
@@ -250,7 +251,9 @@ export const ApplyPatchTool = Tool.define(
         }
 
         if (edited) {
-          if (yield* format.file(edited)) {
+          const formatting = yield* format.file(edited)
+          formatReports.push(Format.report(edited, formatting))
+          if (formatting.status === "success") {
             yield* Bom.syncFile(afs, edited, change.bom)
           }
           yield* events.publish(FileSystem.Event.Edited, { file: edited })
@@ -292,8 +295,11 @@ export const ApplyPatchTool = Tool.define(
         output += `\n\nLSP errors detected in ${rel}, please fix:\n${block}`
       }
 
+      const title = output
+      output += formatReports.join("")
+
       return {
-        title: output,
+        title,
         metadata: {
           diff: totalDiff,
           files,

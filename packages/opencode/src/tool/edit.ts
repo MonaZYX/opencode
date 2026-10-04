@@ -82,6 +82,8 @@ export const EditTool = Tool.define(
             : path.join(instance.directory, params.filePath)
           yield* assertExternalDirectoryEffect(ctx, filePath)
 
+          let formatReport = ""
+          let diffConfirmed = true
           let diff = ""
           let contentOld = ""
           let contentNew = ""
@@ -109,9 +111,17 @@ export const EditTool = Tool.define(
                   },
                 })
                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-                if (yield* format.file(filePath)) {
+                const formatting = yield* format.file(filePath)
+                formatReport = Format.report(filePath, formatting)
+                if (formatting.status === "success") {
                   contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
                 }
+                if (formatting.status === "failed") {
+                  const actual = yield* Bom.readFile(afs, filePath).pipe(Effect.result)
+                  if (actual._tag === "Success") contentNew = actual.success.text
+                  if (actual._tag === "Failure") diffConfirmed = false
+                }
+                diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
                 yield* events.publish(FileSystem.Event.Edited, { file: filePath })
                 yield* events.publish(Watcher.Event.Updated, {
                   file: filePath,
@@ -153,8 +163,15 @@ export const EditTool = Tool.define(
               })
 
               yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-              if (yield* format.file(filePath)) {
+              const formatting = yield* format.file(filePath)
+              formatReport = Format.report(filePath, formatting)
+              if (formatting.status === "success") {
                 contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+              }
+              if (formatting.status === "failed") {
+                const actual = yield* Bom.readFile(afs, filePath).pipe(Effect.result)
+                if (actual._tag === "Success") contentNew = actual.success.text
+                if (actual._tag === "Failure") diffConfirmed = false
               }
               yield* events.publish(FileSystem.Event.Edited, { file: filePath })
               yield* events.publish(Watcher.Event.Updated, {
@@ -172,9 +189,10 @@ export const EditTool = Tool.define(
             }).pipe(Effect.orDie),
           )
 
+          if (!diffConfirmed) diff = ""
           let additions = 0
           let deletions = 0
-          for (const change of diffLines(contentOld, contentNew)) {
+          for (const change of diffConfirmed ? diffLines(contentOld, contentNew) : []) {
             if (change.added) additions += change.count || 0
             if (change.removed) deletions += change.count || 0
           }
@@ -193,7 +211,10 @@ export const EditTool = Tool.define(
             },
           })
 
-          let output = "Edit applied successfully."
+          let output =
+            "Edit applied successfully." +
+            formatReport +
+            (diffConfirmed ? "" : "\nThe final diff could not be confirmed because the file could not be read.")
           yield* lsp.touchFile(filePath, "document")
           const diagnostics = yield* lsp.diagnostics()
           const normalizedFilePath = FSUtil.normalizePath(filePath)
@@ -203,6 +224,7 @@ export const EditTool = Tool.define(
           return {
             metadata: {
               diagnostics,
+              ...(!diffConfirmed ? { diffConfirmed } : {}),
               diff,
               filediff,
             },

@@ -62,7 +62,8 @@ export const WriteTool = Tool.define(
           })
 
           yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
-          if (yield* format.file(filepath)) {
+          const formatting = yield* format.file(filepath)
+          if (formatting.status === "success") {
             yield* Bom.syncFile(fs, filepath, desiredBom)
           }
           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
@@ -71,7 +72,7 @@ export const WriteTool = Tool.define(
             event: exists ? "change" : "add",
           })
 
-          let output = "Wrote file successfully."
+          let output = "Wrote file successfully." + Format.report(filepath, formatting)
           yield* lsp.touchFile(filepath, "document")
           const diagnostics = yield* lsp.diagnostics()
           const normalizedFilepath = FSUtil.normalizePath(filepath)

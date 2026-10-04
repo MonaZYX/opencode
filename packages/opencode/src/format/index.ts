@@ -8,6 +8,7 @@ import path from "path"
 import { mergeDeep } from "remeda"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { errorMessage } from "@/util/error"
 import * as Formatter from "./formatter"
 
@@ -18,10 +19,53 @@ export const Status = Schema.Struct({
 }).annotate({ identifier: "FormatterStatus" })
 export type Status = Schema.Schema.Type<typeof Status>
 
+export interface Outcome {
+  name: string
+  status: "success" | "failed"
+  exitCode?: number
+  error?: string
+  stdout: string
+  stderr: string
+  stdoutTruncated: boolean
+  stderrTruncated: boolean
+}
+
+export interface Result {
+  status: "skipped" | "success" | "failed"
+  outcomes: Outcome[]
+  snapshotError?: string
+  restoration?: "restored" | "restore-failed"
+  restoreError?: string
+}
+
+export function report(filepath: string, result: Result): string {
+  if (result.status !== "failed") return ""
+  const details = result.outcomes
+    .filter((item) => item.status === "failed")
+    .map((item) =>
+      [
+        `Formatter ${item.name} failed${item.exitCode === undefined ? "" : ` (exit ${item.exitCode})`}.`,
+        item.error,
+        item.stdout && `stdout${item.stdoutTruncated ? " (truncated)" : ""}:\n${item.stdout}`,
+        item.stderr && `stderr${item.stderrTruncated ? " (truncated)" : ""}:\n${item.stderr}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+  return `\n\nFormatting failed for ${filepath}.\n${[
+    result.snapshotError && `Could not save the pre-format snapshot; no formatter ran: ${result.snapshotError}`,
+    ...details,
+    result.restoration === "restored" && "Restored the file to the requested edit before formatting.",
+    result.restoreError && `Could not restore the file: ${result.restoreError}. Final contents are uncertain.`,
+  ]
+    .filter(Boolean)
+    .join("\n")}`
+}
+
 export interface Interface {
   readonly init: () => Effect.Effect<void>
   readonly status: () => Effect.Effect<Status[]>
-  readonly file: (filepath: string) => Effect.Effect<boolean>
+  readonly file: (filepath: string) => Effect.Effect<Result>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Format") {}
@@ -34,6 +78,7 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const appProcess = yield* AppProcess.Service
     const flags = yield* RuntimeFlags.Service
+    const fs = yield* FSUtil.Service
 
     const state = yield* InstanceState.make(
       Effect.fn("Format.state")(function* (ctx) {
@@ -70,48 +115,65 @@ const layer = Layer.effect(
             .map((x) => ({ item: x.item, cmd: x.cmd }))
         }
 
-        function formatFile(filepath: string) {
+        function formatFile(filepath: string): Effect.Effect<Result> {
           return Effect.gen(function* () {
-            yield* Effect.logInfo("formatting", { file: filepath })
-            const formatters = yield* Effect.promise(() => getFormatter(path.extname(filepath)))
+            const matching = yield* Effect.promise(() => getFormatter(path.extname(filepath)))
+            if (!matching.length) return { status: "skipped", outcomes: [] }
 
-            if (!formatters.length) return false
-
-            for (const { item, cmd } of formatters) {
-              yield* Effect.logInfo("running", { command: cmd })
-              const replaced = cmd.map((x) => x.replace("$FILE", filepath))
-              const dir = yield* InstanceState.directory
+            // Snapshot the tool's edit once, so a later failure also undoes earlier formatters.
+            const snapshot = yield* fs.readFile(filepath).pipe(Effect.result)
+            if (snapshot._tag === "Failure") {
+              return { status: "failed", outcomes: [], snapshotError: errorMessage(snapshot.failure) }
+            }
+            const outcomes: Outcome[] = []
+            const dir = yield* InstanceState.directory
+            for (const entry of matching) {
+              const replaced = entry.cmd.map((x) => x.replaceAll("$FILE", filepath))
               const result = yield* appProcess
                 .run(
                   ChildProcess.make(replaced[0]!, replaced.slice(1), {
                     cwd: dir,
-                    env: item.environment,
+                    env: entry.item.environment,
                     extendEnv: true,
                     stdin: "ignore",
-                    stdout: "ignore",
-                    stderr: "ignore",
+                    stdout: "pipe",
+                    stderr: "pipe",
                   }),
+                  { maxOutputBytes: 64 * 1024, maxErrorBytes: 64 * 1024 },
                 )
-                .pipe(
-                  Effect.catch((error) =>
-                    Effect.logError("failed to format file", {
-                      error: "spawn failed",
-                      command: cmd,
-                      ...item.environment,
-                      file: filepath,
-                      cause: errorMessage(error.cause ?? error),
-                    }).pipe(Effect.as(undefined)),
-                  ),
-                )
-              if (result && result.exitCode !== 0) {
-                yield* Effect.logError("failed", {
-                  command: cmd,
-                  ...item.environment,
-                })
+                .pipe(Effect.result)
+              const outcome: Outcome =
+                result._tag === "Failure"
+                  ? {
+                      name: entry.item.name,
+                      status: "failed",
+                      error: errorMessage(result.failure.cause ?? result.failure),
+                      exitCode: result.failure.exitCode,
+                      stdout: "",
+                      stderr: result.failure.stderr ?? "",
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    }
+                  : {
+                      name: entry.item.name,
+                      status: result.success.exitCode === 0 ? "success" : "failed",
+                      exitCode: result.success.exitCode,
+                      stdout: result.success.stdout.toString("utf8"),
+                      stderr: result.success.stderr.toString("utf8"),
+                      stdoutTruncated: result.success.stdoutTruncated,
+                      stderrTruncated: result.success.stderrTruncated,
+                    }
+              outcomes.push(outcome)
+              if (outcome.status === "success") continue
+              const restored = yield* fs.writeFile(filepath, snapshot.success).pipe(Effect.result)
+              return {
+                status: "failed",
+                outcomes,
+                restoration: restored._tag === "Success" ? "restored" : "restore-failed",
+                restoreError: restored._tag === "Failure" ? errorMessage(restored.failure) : undefined,
               }
             }
-
-            return true
+            return { status: "success", outcomes }
           })
         }
 
@@ -197,7 +259,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, AppProcess.node, RuntimeFlags.node],
+  deps: [Config.node, AppProcess.node, RuntimeFlags.node, FSUtil.node],
 })
 
 export * as Format from "."

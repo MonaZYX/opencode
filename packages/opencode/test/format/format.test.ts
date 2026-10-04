@@ -95,7 +95,7 @@ describe("Format", () => {
   it.instance("service initializes without error", () => Format.Service.use(() => Effect.void))
 
   it.instance(
-    "file() returns false when no formatter runs",
+    "file() returns skipped when no formatter runs",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -103,7 +103,7 @@ describe("Format", () => {
         yield* Effect.promise(() => Bun.write(file, "x"))
 
         const formatted = yield* Format.use.file(file)
-        expect(formatted).toBe(false)
+        expect(formatted.status).toBe("skipped")
       }),
     { config: { formatter: false } },
   )
@@ -201,7 +201,7 @@ describe("Format", () => {
         yield* Format.Service.use((fmt) =>
           Effect.gen(function* () {
             yield* fmt.init()
-            expect(yield* fmt.file(file)).toBe(true)
+            expect((yield* fmt.file(file)).status).toBe("success")
           }),
         )
 

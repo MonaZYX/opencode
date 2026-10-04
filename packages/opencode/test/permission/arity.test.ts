@@ -31,3 +31,14 @@ test("edge cases", () => {
   expect(BashArity.prefix(["single"])).toEqual(["single"])
   expect(BashArity.prefix(["git"])).toEqual(["git"])
 })
+
+test("Request 5 raw flag-placement characterization", () => {
+  const commands = ["npm --silent run test", "npm run --silent test", "npm run test --silent"]
+  expect(commands.map((command) => BashArity.prefix(command.split(" ")).join(" ") + " *")).toEqual([
+    "npm --silent *",
+    "npm run --silent *",
+    "npm run test *",
+  ])
+  expect(BashArity.prefix(["rm", "-rf", "foo"])).toEqual(["rm"])
+  expect(BashArity.prefix(["npm", "run", "dev"])).toEqual(["npm", "run", "dev"])
+})

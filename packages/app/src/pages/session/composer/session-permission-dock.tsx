@@ -69,6 +69,17 @@ export function SessionPermissionDock(props: {
           </div>
         </div>
       </Show>
+      <Show when={props.request.always.length > 0}>
+        <div data-slot="permission-row">
+          <span data-slot="permission-spacer" aria-hidden="true" />
+          <div data-slot="permission-patterns" data-testid="permission-always-patterns">
+            <span class="text-12-regular text-text-base">{language.t("ui.permission.allowAlways")}</span>
+            <For each={props.request.always}>
+              {(pattern) => <code class="text-12-regular text-text-base break-all">{pattern}</code>}
+            </For>
+          </div>
+        </div>
+      </Show>
     </DockPrompt>
   )
 }

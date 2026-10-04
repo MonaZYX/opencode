@@ -20,6 +20,7 @@ import { Plugin } from "@/plugin"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
+import { classify } from "./shell/classify"
 import { BashArity } from "@/permission/arity"
 
 export { Parameters } from "./shell/prompt"
@@ -74,6 +75,7 @@ type Scan = {
   dirs: Set<string>
   patterns: Set<string>
   always: Set<string>
+  commands: Map<string, string>
 }
 
 type Chunk = {
@@ -284,6 +286,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
     permission: ShellID.ToolID,
     patterns: Array.from(scan.patterns),
     always: Array.from(scan.always),
+    commands: Array.from(scan.commands, ([raw, canonical]) => ({ raw, canonical })),
     metadata: {
       command: input.command,
     },
@@ -386,6 +389,7 @@ export const ShellTool = Tool.define(
         dirs: new Set<string>(),
         patterns: new Set<string>(),
         always: new Set<string>(),
+        commands: new Map<string, string>(),
       }
       const shellKind = ShellID.toKind(Shell.name(shell))
 
@@ -405,8 +409,14 @@ export const ShellTool = Tool.define(
         }
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
-          scan.patterns.add(source(node))
-          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          const raw = source(node)
+          scan.patterns.add(raw)
+          // parts() omits expansions, assignments and redirects. Never infer an
+          // identity from that incomplete token list.
+          const complete = raw.split(/\s+/).join(" ") === tokens.join(" ")
+          const identity = !ps && shellKind !== "cmd" && complete ? classify(tokens) : undefined
+          if (identity) scan.commands.set(raw, identity.join(" "))
+          scan.always.add(BashArity.prefix(identity ?? tokens).join(" ") + " *")
         }
       }
 

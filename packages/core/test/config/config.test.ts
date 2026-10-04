@@ -115,6 +115,33 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("preserves LSP preferences when migrating v1 configuration", () =>
+    Effect.sync(() => {
+      const input = { lsp: true, lspPreference: { ".ts": "typescript", ".vue": "vue" } }
+      const legacy = Schema.decodeUnknownSync(ConfigV1.Info)(input)
+      const migrated = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate(legacy))
+      expect(migrated.lspPreference).toEqual(input.lspPreference)
+      expect(Schema.decodeUnknownSync(Config.Info)(input).lspPreference).toEqual(input.lspPreference)
+    }),
+  )
+
+  it.effect("rejects malformed LSP preferences in both configuration versions", () =>
+    Effect.sync(() => {
+      const invalid = [
+        { ts: "typescript" },
+        { ".": "typescript" },
+        { ".ts/js": "typescript" },
+        { ".ts\\js": "typescript" },
+        { ".ts": "" },
+        { ".ts": 42 },
+      ]
+      for (const lspPreference of invalid) {
+        expect(() => Schema.decodeUnknownSync(ConfigV1.Info)({ lspPreference })).toThrow()
+        expect(() => Schema.decodeUnknownSync(Config.Info)({ lspPreference })).toThrow()
+      }
+    }),
+  )
+
   it.effect("migrates v1 command configuration", () =>
     Effect.sync(() => {
       expect(

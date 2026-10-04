@@ -3,12 +3,20 @@ import { Effect } from "effect"
 import { effectCmd } from "../../effect-cmd"
 import { cmd } from "../cmd"
 import { EOL } from "os"
+import path from "path"
+import { InstanceState } from "@/effect/instance-state"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 
 export const LSPCommand = cmd({
   command: "lsp",
   describe: "LSP debugging utilities",
   builder: (yargs) =>
-    yargs.command(DiagnosticsCommand).command(SymbolsCommand).command(DocumentSymbolsCommand).demandCommand(),
+    yargs
+      .command(DiagnosticsCommand)
+      .command(ExplainCommand)
+      .command(SymbolsCommand)
+      .command(DocumentSymbolsCommand)
+      .demandCommand(),
   async handler() {},
 })
 
@@ -24,6 +32,19 @@ const DiagnosticsCommand = effectCmd({
       }),
     )
     process.stdout.write(JSON.stringify(out, null, 2) + EOL)
+  }),
+})
+
+const ExplainCommand = effectCmd({
+  command: "explain <file>",
+  describe: "show LSP selection and startup decisions for a file",
+  builder: (yargs) => yargs.positional("file", { type: "string", demandOption: true }),
+  handler: Effect.fn("Cli.debug.lsp.explain")(function* (args) {
+    const ctx = yield* InstanceState.context
+    const fs = yield* FSUtil.Service
+    const file = yield* fs.resolve(path.resolve(ctx.directory, args.file))
+    const result = yield* LSP.Service.use((lsp) => lsp.explain(file))
+    process.stdout.write(JSON.stringify(result, null, 2) + EOL)
   }),
 })
 

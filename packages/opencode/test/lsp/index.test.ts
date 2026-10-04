@@ -1,7 +1,7 @@
 import { describe, expect, spyOn } from "bun:test"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Deferred, Effect, Layer } from "effect"
+import { Deferred, Effect, Layer, Logger } from "effect"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -224,6 +224,403 @@ describe("lsp.spawn", () => {
           } finally {
             pyright.mockRestore()
           }
+        }),
+      ),
+    { config: { lsp: true } },
+  )
+})
+
+describe("lsp selection", () => {
+  const fake = { command: [process.execPath, fakeServerPath], extensions: [".repro"] }
+
+  it.instance(
+    "considers the five built-in servers that claim TypeScript files",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const servers = [LSPServer.Deno, LSPServer.Typescript, LSPServer.ESLint, LSPServer.Oxlint, LSPServer.Biome]
+          const spies = servers.map((server) => spyOn(server, "spawn").mockResolvedValue(undefined))
+          try {
+            const file = path.join((yield* TestInstance).directory, "sample.ts")
+            const explanation = yield* lsp.explain(file)
+            expect(explanation.decisions.map((decision) => decision.id).sort()).toEqual([
+              "biome",
+              "deno",
+              "eslint",
+              "oxlint",
+              "typescript",
+            ])
+          } finally {
+            spies.forEach((spy) => spy.mockRestore())
+          }
+        }),
+      ),
+    { config: { lsp: true } },
+  )
+
+  it.instance(
+    "starts every matching server without a preference",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.repro")
+          const explanation = yield* lsp.explain(file)
+          expect(explanation.decisions.filter((decision) => decision.started).map((decision) => decision.id)).toEqual([
+            "first",
+            "second",
+            "third",
+            "fourth",
+            "fifth",
+          ])
+          expect(explanation.decisions.every((decision) => decision.reason === "default")).toBe(true)
+          expect((yield* lsp.status()).length).toBe(5)
+          expect(yield* lsp.ensureClients(file)).toBe(true)
+        }),
+      ),
+    { config: { lsp: { first: fake, second: fake, third: fake, fourth: fake, fifth: fake } } },
+  )
+
+  it.instance(
+    "starts only the preferred server and leaves other extensions available",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const dir = (yield* TestInstance).directory
+          const explanation = yield* lsp.explain(path.join(dir, "sample.repro"))
+          expect(explanation.decisions.find((decision) => decision.id === "first")).toMatchObject({
+            selected: true,
+            started: true,
+            reason: "preferred",
+          })
+          expect(explanation.decisions.find((decision) => decision.id === "second")).toMatchObject({
+            selected: false,
+            started: false,
+            reason: "not-preferred",
+          })
+          expect(explanation.decisions.filter((decision) => decision.started).map((decision) => decision.id)).toEqual([
+            "first",
+          ])
+          expect((yield* lsp.status()).map((item) => item.id)).toEqual(["first"])
+          const other = yield* lsp.explain(path.join(dir, "sample.other"))
+          expect(other.decisions.find((decision) => decision.id === "second")?.started).toBe(true)
+        }),
+      ),
+    {
+      config: {
+        lsp: {
+          first: fake,
+          second: { ...fake, extensions: [".repro", ".other"] },
+          third: fake,
+          fourth: fake,
+          fifth: fake,
+        },
+        lspPreference: { ".repro": "first" },
+      },
+    },
+  )
+
+  it.instance(
+    "falls back when the preferred server is disabled",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.repro")
+          const messages: unknown[] = []
+          const explanation = yield* lsp
+            .explain(file)
+            .pipe(
+              Effect.provide(Logger.layer([Logger.make<unknown, void>((options) => messages.push(options.message))])),
+            )
+          expect(explanation.decisions.find((decision) => decision.id === "first")).toMatchObject({
+            selected: false,
+            started: false,
+            reason: "disabled",
+          })
+          expect(explanation.decisions.find((decision) => decision.id === "second")).toMatchObject({
+            selected: true,
+            started: true,
+            reason: "fallback",
+          })
+          expect(explanation.decisions.find((decision) => decision.id === "third")).toMatchObject({
+            selected: false,
+            started: false,
+            reason: "not-preferred",
+          })
+          expect(messages).toContainEqual([
+            "preferred LSP unavailable; fallback server may offer different features",
+            expect.objectContaining({ extension: ".repro", preferred: "first", fallback: "second" }),
+          ])
+          expect(yield* lsp.ensureClients(file)).toBe(true)
+        }),
+      ),
+    {
+      config: {
+        lsp: { first: { disabled: true }, second: fake, third: fake },
+        lspPreference: { ".repro": "first" },
+      },
+    },
+  )
+
+  it.instance(
+    "reports an unknown preference and uses one matching server",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.repro")
+          const messages: unknown[] = []
+          const explanation = yield* lsp
+            .explain(file)
+            .pipe(
+              Effect.provide(Logger.layer([Logger.make<unknown, void>((options) => messages.push(options.message))])),
+            )
+          expect(explanation.decisions.find((decision) => decision.id === "typo")).toMatchObject({
+            started: false,
+            reason: "unknown-preference",
+          })
+          expect(explanation.decisions.filter((decision) => decision.started).map((decision) => decision.id)).toEqual([
+            "first",
+          ])
+          expect(messages).toContainEqual(["unknown preferred LSP server", { extension: ".repro", serverID: "typo" }])
+          expect(messages).toContainEqual([
+            "preferred LSP unavailable; fallback server may offer different features",
+            { extension: ".repro", preferred: "typo", fallback: "first" },
+          ])
+          expect(yield* lsp.ensureClients(file)).toBe(true)
+          expect((yield* lsp.status()).map((client) => client.id)).toEqual(["first"])
+        }),
+      ),
+    {
+      config: { lsp: { first: fake, second: fake }, lspPreference: { ".repro": "typo" } },
+    },
+  )
+
+  it.instance(
+    "warns and falls back once when a preferred server does not support the extension",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.repro")
+          const messages: unknown[] = []
+          const explanation = yield* Effect.gen(function* () {
+            expect(yield* lsp.ensureClients(file)).toBe(true)
+            return yield* lsp.explain(file)
+          }).pipe(
+            Effect.provide(Logger.layer([Logger.make<unknown, void>((options) => messages.push(options.message))])),
+          )
+          expect(explanation.decisions.find((decision) => decision.id === "first")).toMatchObject({
+            selected: false,
+            started: false,
+            reason: "extension-mismatch",
+          })
+          expect(explanation.decisions.find((decision) => decision.id === "second")).toMatchObject({
+            selected: true,
+            started: true,
+            reason: "fallback",
+          })
+          expect(explanation.decisions.find((decision) => decision.id === "third")).toMatchObject({
+            selected: false,
+            started: false,
+            reason: "not-preferred",
+          })
+          expect((yield* lsp.status()).map((client) => client.id)).toEqual(["second"])
+          expect(
+            messages.filter(
+              (message) =>
+                Array.isArray(message) &&
+                message[0] === "preferred LSP unavailable; fallback server may offer different features",
+            ),
+          ).toEqual([
+            [
+              "preferred LSP unavailable; fallback server may offer different features",
+              { extension: ".repro", preferred: "first", fallback: "second" },
+            ],
+          ])
+        }),
+      ),
+    {
+      config: {
+        lsp: { first: { ...fake, extensions: [".other"] }, second: fake, third: fake },
+        lspPreference: { ".repro": "first" },
+      },
+    },
+  )
+
+  it.instance(
+    "reuses the preferred TypeScript client and reports matching linters as not preferred",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.ts")
+          yield* Effect.promise(() => Bun.write(file, "const answer = 42\n"))
+          expect(yield* lsp.ensureClients(file)).toBe(true)
+          yield* lsp.touchFile(file)
+          const explanation = yield* lsp.explain(file)
+          expect(explanation.decisions.find((decision) => decision.id === "typescript")).toMatchObject({
+            selected: true,
+            started: true,
+            reason: "preferred",
+          })
+          for (const id of ["eslint", "oxlint", "biome"]) {
+            expect(explanation.decisions.find((decision) => decision.id === id)).toMatchObject({
+              selected: false,
+              started: false,
+              reason: "not-preferred",
+            })
+          }
+          expect((yield* lsp.status()).map((client) => client.id)).toEqual(["typescript"])
+        }),
+      ),
+    {
+      config: {
+        lsp: {
+          typescript: { ...fake, extensions: [".ts"] },
+          eslint: { ...fake, extensions: [".ts"] },
+          oxlint: { ...fake, extensions: [".ts"] },
+          biome: { ...fake, extensions: [".ts"] },
+        },
+        lspPreference: { ".ts": "typescript" },
+      },
+    },
+  )
+
+  it.instance(
+    "falls back when the preferred server has no project root",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.ts")
+          const explanation = yield* lsp.explain(file)
+          expect(explanation.decisions.find((decision) => decision.id === "deno")).toMatchObject({
+            started: false,
+            reason: "no-root",
+          })
+          expect(explanation.decisions.filter((decision) => decision.started).map((decision) => decision.id)).toEqual([
+            "typescript",
+          ])
+          expect(yield* lsp.ensureClients(file)).toBe(true)
+        }),
+      ),
+    {
+      config: {
+        lsp: { typescript: { ...fake, extensions: [".ts"] } },
+        lspPreference: { ".ts": "deno" },
+      },
+    },
+  )
+
+  it.instance(
+    "falls back when the preferred executable does not exist",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.repro")
+          const explanation = yield* lsp.explain(file)
+          expect(explanation.decisions.find((decision) => decision.id === "first")).toMatchObject({
+            started: false,
+            reason: "spawn-failed",
+          })
+          expect(explanation.decisions.find((decision) => decision.id === "second")).toMatchObject({
+            started: true,
+            reason: "fallback",
+          })
+          expect(yield* lsp.ensureClients(file)).toBe(true)
+          expect((yield* lsp.status()).map((client) => client.id)).toEqual(["second"])
+        }),
+      ),
+    {
+      config: {
+        lsp: {
+          first: { command: ["opencode-nonexistent-lsp-for-test"], extensions: [".repro"] },
+          second: fake,
+          third: fake,
+        },
+        lspPreference: { ".repro": "first" },
+      },
+    },
+  )
+
+  it.instance(
+    "returns no clients or diagnostics when the preferred server and every fallback fail",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.repro")
+          const explanation = yield* lsp.explain(file)
+          expect(explanation.decisions.filter((decision) => decision.started)).toEqual([])
+          expect(explanation.decisions.every((decision) => decision.reason === "spawn-failed")).toBe(true)
+          expect(yield* lsp.ensureClients(file)).toBe(false)
+          yield* lsp.touchFile(file)
+          expect(yield* lsp.status()).toEqual([])
+          expect(yield* lsp.diagnostics()).toEqual({})
+        }),
+      ),
+    {
+      config: {
+        lsp: {
+          first: { command: ["opencode-nonexistent-lsp-for-test"], extensions: [".repro"] },
+          second: { command: ["opencode-nonexistent-lsp-for-test"], extensions: [".repro"] },
+        },
+        lspPreference: { ".repro": "first" },
+      },
+    },
+  )
+
+  it.instance(
+    "ignores preferences when LSP is disabled",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.repro")
+          expect(yield* lsp.ensureClients(file)).toBe(false)
+          expect((yield* lsp.explain(file)).decisions).toEqual([])
+        }),
+      ),
+    { config: { lsp: false, lspPreference: { ".repro": "first" } } },
+  )
+
+  it.instance(
+    "falls back in the same call when the preferred server fails to start",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.ts")
+          const typescript = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+          try {
+            const explanation = yield* lsp.explain(file)
+            expect(explanation.decisions.find((decision) => decision.id === "typescript")).toMatchObject({
+              selected: true,
+              started: false,
+              reason: "spawn-failed",
+            })
+            expect(explanation.decisions.find((decision) => decision.id === "fallback")).toMatchObject({
+              selected: true,
+              started: true,
+              reason: "fallback",
+            })
+            expect(yield* lsp.ensureClients(file)).toBe(true)
+          } finally {
+            typescript.mockRestore()
+          }
+        }),
+      ),
+    {
+      config: {
+        lsp: { fallback: { ...fake, extensions: [".ts"] } },
+        lspPreference: { ".ts": "typescript" },
+      },
+    },
+  )
+
+  it.instance(
+    "returns empty diagnostics for an unmatched file",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join((yield* TestInstance).directory, "sample.no-lsp")
+          yield* lsp.touchFile(file)
+          expect(yield* lsp.ensureClients(file)).toBe(false)
+          expect((yield* lsp.explain(file)).decisions).toEqual([])
+          expect(yield* lsp.diagnostics()).toEqual({})
         }),
       ),
     { config: { lsp: true } },
